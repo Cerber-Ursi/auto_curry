@@ -98,7 +98,7 @@ pub fn auto_curry(
         #[allow(nonstandard_style)] #vis const #ident: #base_type = #base_type();
     };
 
-    let mut steps = Vec::with_capacity(inputs.len() - 1);
+    let mut steps = Vec::with_capacity(inputs.len());
 
     let (args, rest) = inputs.split_at(0);
     steps.push(CurryStep {
@@ -131,8 +131,40 @@ pub fn auto_curry(
         }
     });
 
+    let steps_count = steps.len();
+    let mut intermediate_impls = Vec::with_capacity((steps_count - 2) * (steps_count - 1) / 2);
+    for from in 1..steps_count {
+        for to in from + 1..steps_count {
+            let type_from = &steps[from].ident;
+            let type_to = &steps[to].ident;
+            let args = &steps[from].rest[0..to - from];
+            let unpacked = steps[from]
+                .args
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, _)| {
+                    let index = syn::Index::from(index);
+                    quote! {self.#index}
+                })
+                .chain(args.iter().cloned().enumerate().map(|(index, _)| {
+                    let index = syn::Index::from(index);
+                    quote! {args.#index}
+                }));
+            intermediate_impls.push(quote! {
+                impl FnOnce<(#(#args),*,)> for #type_from {
+                    type Output = #type_to;
+                    extern "rust-call" fn call_once(self, args: (#(#args),*,)) -> #type_to {
+                        #type_to(#(#unpacked),*)
+                    }
+                }
+            });
+        }
+    }
+
     let real_impl_name = format_ident!("{}_REAL_IMPL", ident);
-    let real_impl = quote! { #[allow(nonstandard_style)] fn #real_impl_name(#fn_inputs) #output #block };
+    let real_impl =
+        quote! { #[allow(nonstandard_style)] fn #real_impl_name(#fn_inputs) #output #block };
 
     let final_impls = steps.iter().map(|CurryStep { ident, args, rest }| {
         let unpacked_args = args.iter().enumerate().map(|(index, _)| {
@@ -162,6 +194,7 @@ pub fn auto_curry(
         #base
         #(#steps)*
         #(#base_impls)*
+        #(#intermediate_impls)*
         #(#final_impls)*
         #real_impl
     };
